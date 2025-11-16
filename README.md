@@ -12,3 +12,10 @@ Likely need to get some craft way of determining the fundamental of dynamic samp
 
 Added a basic log - the intent is to match it to midi ticks and do real time recording with it so that the midi can be exported as a standard .mid file. 
 Monophinic detection.. and it has an averaging of sorts of the frequencies. I think at some point I will need to detect spectrum strength to have more precise analysis but need to look into that a bit more.
+
+Q. How can we extend the clear detection range without adding significant computational complexity.
+
+Q. How much extra processing is added by analyzing seperate spectrum ranges ex. low mid high frequency detection bands. 
+
+Q. What gradient of power exists for generalized human undertsanding of the fundamental versus harmonics - for power ratios - human detection of the fundamnetal needs to be represented clearly rather than only the accoustical / physical model of the frequencies if it is going to be an effective tool, what methods can be used to introduce a psychoaccoustic element to 
+note detection.
