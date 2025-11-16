@@ -3,3 +3,5 @@ to be reduced on the FFT processing overhead.  The idea was to set the range at 
 The next step after that is to enable polyphonic detect and more precise fundamantal and harmonic detection which will take a little thinking to figure out what the best method of doing that is likely related to spectrum analysis.
 
 I will do a full readme once this project has developed a bit more. 
+
+JUCE v8.09  plugin basics + dsp.
