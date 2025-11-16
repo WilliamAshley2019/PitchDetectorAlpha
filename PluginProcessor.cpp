@@ -67,23 +67,31 @@ void PitchDetectorAudioProcessor::prepareToPlay(double sampleRate, int samplesPe
         {
             hannWindow[i] = 0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi * i / (newBufferSize - 1)));
         }
+
+        // Force fresh buffer fill after resize
+        writePosition.store(0, std::memory_order_relaxed);
+        bufferReady.store(false, std::memory_order_relaxed);
     }
 
     // Calculate hop size based on update rate parameter
-    // Update rates: 2, 4, 8, 12, 20, 30 times per second
     const int updateRates[] = { 2, 4, 8, 12, 20, 30 };
     int updateRateIndex = static_cast<int>(updateRateParam->load());
     int updatesPerSecond = updateRates[updateRateIndex];
 
-    // Calculate samples between updates
+    // Link buffer size to update rate for stability (N ≈ 2-4x hop)
+    int suggestedN = static_cast<int>(sampleRate / updatesPerSecond * 2);
+    if (newBufferSize > suggestedN * 2)
+    {
+        // Cap update rate to prevent overload
+        updatesPerSecond = juce::jmin(updatesPerSecond, static_cast<int>(sampleRate / newBufferSize * 0.5));
+    }
+
     int newHopSize = static_cast<int>(sampleRate / updatesPerSecond);
     currentHopSize.store(newHopSize, std::memory_order_relaxed);
 
-    writePosition.store(0, std::memory_order_relaxed);
     dcBlockerX.store(0.0f, std::memory_order_relaxed);
     dcBlockerY.store(0.0f, std::memory_order_relaxed);
     samplesUntilNextAnalysis.store(0, std::memory_order_relaxed);
-    bufferReady.store(false, std::memory_order_relaxed);
 }
 
 void PitchDetectorAudioProcessor::releaseResources() {}
@@ -109,6 +117,11 @@ void PitchDetectorAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // Get input for analysis only (channel 0)
     const auto* channelData = buffer.getReadPointer(0);
     const int numSamples = buffer.getNumSamples();
+
+    // Update time tracking
+    double sr = currentSampleRate.load(std::memory_order_relaxed);
+    currentTime += numSamples / sr;
+    sampleCount += numSamples;
 
     // Collect samples for pitch detection (doesn't affect audio output)
     collectSamples(channelData, numSamples);
@@ -149,7 +162,9 @@ void PitchDetectorAudioProcessor::collectSamples(const float* channelData, int n
         if (pos >= currentBufferSize)
         {
             pos = 0;
-            bufferReady.store(true, std::memory_order_relaxed);
+            // Once buffer is full, keep it ready (don't reset to false)
+            if (!bufferReady.load(std::memory_order_relaxed))
+                bufferReady.store(true, std::memory_order_relaxed);
         }
     }
 
@@ -161,11 +176,14 @@ void PitchDetectorAudioProcessor::collectSamples(const float* channelData, int n
 void PitchDetectorAudioProcessor::runPitchDetection()
 {
     int currentBufferSize = analysisBufferSize.load(std::memory_order_relaxed);
+    int wp = writePosition.load(std::memory_order_relaxed);
 
-    // Copy to processing buffer and apply window
+    // CRITICAL FIX: Copy circular buffer in sequential order (oldest to newest)
+    // writePosition points to next write location = start of oldest data
     for (int i = 0; i < currentBufferSize; ++i)
     {
-        processingBuffer[i] = analysisBuffer[i] * hannWindow[i];
+        int buf_idx = (wp + i) % currentBufferSize;
+        processingBuffer[i] = analysisBuffer[buf_idx] * hannWindow[i];
     }
 
     // Detect pitch
@@ -175,34 +193,74 @@ void PitchDetectorAudioProcessor::runPitchDetection()
     detectedFrequency.store(frequency, std::memory_order_relaxed);
 
     if (frequency > 0.0f)
+    {
         frequencyToNote(frequency);
+
+        // Log pitch if recording
+        if (recording.load(std::memory_order_relaxed))
+        {
+            // Calculate MIDI note
+            const float midiNoteFloat = 12.0f * std::log2(frequency / 440.0f) + 69.0f;
+            const int midiNote = static_cast<int>(std::round(midiNoteFloat));
+
+            // Only log if note changed or enough time passed (avoid duplicates)
+            if (midiNote != lastMidiNote || (currentTime - lastNoteTime) > 0.1)
+            {
+                // Calculate velocity based on RMS (0-127)
+                float rms = 0.0f;
+                for (int i = 0; i < currentBufferSize; i += 4)
+                    rms += processingBuffer[i] * processingBuffer[i];
+                rms = std::sqrt(rms / (currentBufferSize / 4));
+                float velocity = juce::jlimit(0.0f, 127.0f, rms * 1000.0f);
+
+                PitchEvent event;
+                event.timeInSeconds = currentTime - recordingStartTime;
+                event.frequency = frequency;
+                event.midiNote = midiNote;
+                event.velocity = velocity;
+
+                juce::ScopedLock lock(pitchLogLock);
+                pitchLog.push_back(event);
+
+                lastMidiNote = midiNote;
+                lastNoteTime = currentTime;
+            }
+        }
+    }
     else
     {
         juce::ScopedLock lock(noteNameLock);
         noteName = "---";
         centsOffset.store(0.0f, std::memory_order_relaxed);
+        lastMidiNote = -1;
     }
 }
 
 float PitchDetectorAudioProcessor::detectPitchYIN(const float* buffer, int numSamples, double sampleRate, float threshold)
 {
-    // Quick RMS check (subsampled)
+    // Improved RMS check with better subsampling
     float rms = 0.0f;
-    for (int i = 0; i < numSamples; i += 4)
+    int step = 2;
+    int count = 0;
+    for (int i = 0; i < numSamples; i += step)
+    {
         rms += buffer[i] * buffer[i];
-    rms = std::sqrt(rms / (numSamples / 4));
+        ++count;
+    }
+    rms = std::sqrt(rms / count);
 
-    if (rms < 0.005f)
+    if (rms < 0.01f) // Raised threshold for quieter signals
         return 0.0f;
 
     const int halfSize = numSamples / 2;
     std::vector<float> diff(halfSize);
 
-    // YIN difference function
+    // FIXED: YIN difference function with proper overlap
     for (int tau = 0; tau < halfSize; ++tau)
     {
         float sum = 0.0f;
-        for (int i = 0; i < halfSize; ++i)
+        int max_i = numSamples - tau; // Standard YIN: full overlap for each tau
+        for (int i = 0; i < max_i; ++i)
         {
             const float delta = buffer[i] - buffer[i + tau];
             sum += delta * delta;
@@ -211,7 +269,7 @@ float PitchDetectorAudioProcessor::detectPitchYIN(const float* buffer, int numSa
     }
 
     // Cumulative mean normalized difference
-    diff[0] = 1.0f;
+    diff[0] = 0.0f; // Standard YIN initialization
     float runningSum = 0.0f;
 
     for (int tau = 1; tau < halfSize; ++tau)
@@ -223,9 +281,10 @@ float PitchDetectorAudioProcessor::detectPitchYIN(const float* buffer, int numSa
             diff[tau] = 1.0f;
     }
 
-    // Search range based on musical pitch (50 Hz to 2000 Hz)
-    const int minTau = juce::jmax(2, static_cast<int>(sampleRate / 2000.0));
-    const int maxTau = juce::jmin(halfSize - 2, static_cast<int>(sampleRate / 50.0));
+    // Optimized search range for human voice/instruments (70 Hz - 1200 Hz)
+    // For guitar down to E2 (82 Hz), use /60.0 for maxTau
+    const int minTau = juce::jmax(4, static_cast<int>(sampleRate / 1200.0)); // Up to C7
+    const int maxTau = juce::jmin(halfSize - 2, static_cast<int>(sampleRate / 70.0)); // Down to G1
 
     int bestTau = 0;
 
@@ -307,6 +366,34 @@ void PitchDetectorAudioProcessor::frequencyToNote(float frequency)
 
     juce::ScopedLock lock(noteNameLock);
     noteName = newNoteName;
+}
+
+void PitchDetectorAudioProcessor::startRecording()
+{
+    juce::ScopedLock lock(pitchLogLock);
+    pitchLog.clear();
+    recordingStartTime = currentTime;
+    lastMidiNote = -1;
+    lastNoteTime = 0.0;
+    recording.store(true, std::memory_order_relaxed);
+}
+
+void PitchDetectorAudioProcessor::stopRecording()
+{
+    recording.store(false, std::memory_order_relaxed);
+}
+
+void PitchDetectorAudioProcessor::clearRecording()
+{
+    juce::ScopedLock lock(pitchLogLock);
+    pitchLog.clear();
+    lastMidiNote = -1;
+}
+
+std::vector<PitchDetectorAudioProcessor::PitchEvent> PitchDetectorAudioProcessor::getPitchLog() const
+{
+    juce::ScopedLock lock(pitchLogLock);
+    return pitchLog;
 }
 
 bool PitchDetectorAudioProcessor::hasEditor() const { return true; }
