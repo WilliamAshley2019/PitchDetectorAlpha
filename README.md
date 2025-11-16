@@ -17,5 +17,5 @@ Q. How can we extend the clear detection range without adding significant comput
 
 Q. How much extra processing is added by analyzing seperate spectrum ranges ex. low mid high frequency detection bands. 
 
-Q. What gradient of power exists for generalized human undertsanding of the fundamental versus harmonics - for power ratios - human detection of the fundamnetal needs to be represented clearly rather than only the accoustical / physical model of the frequencies if it is going to be an effective tool, what methods can be used to introduce a psychoaccoustic element to 
+Q. What gradient of power exists for generalized human undertsanding of the fundamental versus harmonics - for power ratios - human detection of the fundamental needs to be represented clearly rather than only the accoustical / physical model of the frequencies if it is going to be an effective tool, what methods can be used to introduce a psychoaccoustic element to 
 note detection.
