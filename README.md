@@ -5,3 +5,6 @@ The next step after that is to enable polyphonic detect and more precise fundama
 I will do a full readme once this project has developed a bit more. 
 
 JUCE v8.09  plugin basics + dsp.
+
+
+Likely need to get some craft way of determining the fundamental of dynamic samples... currently seems to work well with sin wave osc up to about c7 then it starts getting strange results I am thinking perhaps the detection pattern needs to somehow be scaled with pitch to detect correctly the same is true with very low frequnecies I need to see if there is some type of processing ratio that should be applied to low and high frequencies.
